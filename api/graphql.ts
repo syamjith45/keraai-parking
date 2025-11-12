@@ -1,7 +1,7 @@
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
-// FIX: Changed import from `require` to ES module syntax to fix module resolution errors.
-import express from 'express';
+// FIX: Use ES module import syntax for express to ensure proper type inference. This resolves all reported errors.
+import express, { Request } from 'express';
 import cors from 'cors';
 import * as admin from 'firebase-admin';
 
@@ -359,7 +359,8 @@ const server = new ApolloServer<ContextValue>({
 
 server.startInBackgroundHandlingStartupErrorsByLoggingAndFailingAllRequests();
 
-const createContext = async ({ req }: { req: express.Request }): Promise<ContextValue> => {
+// FIX: Use the imported `Request` type for the `req` object.
+const createContext = async ({ req }: { req: Request }): Promise<ContextValue> => {
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
         const token = authHeader.split('Bearer ')[1];
