@@ -1,6 +1,5 @@
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
-// FIX: Use ES module import syntax for express to ensure proper type inference. This resolves all reported errors.
 import express, { Request } from 'express';
 import cors from 'cors';
 import * as admin from 'firebase-admin';
@@ -207,9 +206,7 @@ const resolvers = {
             const snapshot = await adminDb.collection('parkingLots').get();
             return snapshot.docs.map(doc => {
                 const data = doc.data();
-                // FIX: Corrected invalid object literal syntax. The original `({ id, status as string })` is not valid.
-                // The correct shorthand is `({ id, status })` which is equivalent to `({ id: id, status: status })`.
-                const slots = Object.entries(data.slots || {}).map(([id, status]) => ({ id, status }));
+                const slots = Object.entries(data.slots || {}).map(([id, status]) => ({ id, status: status as string }));
                 return { id: doc.id, ...data, slots };
             });
         },
@@ -359,7 +356,6 @@ const server = new ApolloServer<ContextValue>({
 
 server.startInBackgroundHandlingStartupErrorsByLoggingAndFailingAllRequests();
 
-// FIX: Use the imported `Request` type for the `req` object.
 const createContext = async ({ req }: { req: Request }): Promise<ContextValue> => {
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
