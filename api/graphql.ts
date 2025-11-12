@@ -1,23 +1,49 @@
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
-// FIX: Import Request from express and use express.json() instead of bodyParser.
-import express, { Request } from 'express';
+// FIX: Using namespace import for express to resolve type conflicts with global Request/Response types.
+import * as express from 'express';
 import cors from 'cors';
 import * as admin from 'firebase-admin';
-import { BookingStatus } from '../types';
+import { BookingStatus, Vehicle, VehicleType } from '../src/types';
 
 // --- Firebase Admin Initialization ---
+// This now correctly uses the separate environment variables you've set in Vercel.
 if (!admin.apps.length) {
   try {
+    const serviceAccount = {
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      // Replace the escaped newlines in the private key
+      privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+    };
+    
+    if (!serviceAccount.projectId || !serviceAccount.clientEmail || !serviceAccount.privateKey) {
+        throw new Error("Firebase environment variables are not set.");
+    }
+
     admin.initializeApp({
-      credential: admin.credential.cert(JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON as string)),
+      credential: admin.credential.cert(serviceAccount),
     });
   } catch (error: any) {
-    console.error('Firebase admin initialization error', error.stack);
+    console.error('Firebase admin initialization error:', error.message);
   }
 }
 const adminDb = admin.firestore();
 const adminAuth = admin.auth();
+
+// --- Helper function to get all auth users with pagination ---
+const getAllAuthUsers = async (): Promise<admin.auth.UserRecord[]> => {
+    const allUsers: admin.auth.UserRecord[] = [];
+    let pageToken: string | undefined;
+
+    do {
+        const listUsersResult = await adminAuth.listUsers(1000, pageToken);
+        allUsers.push(...listUsersResult.users);
+        pageToken = listUsersResult.pageToken;
+    } while (pageToken);
+
+    return allUsers;
+};
 
 
 // --- GraphQL Schema Definition ---
@@ -74,9 +100,9 @@ const typeDefs = `#graphql
   }
   
   enum BookingStatus {
-    ACTIVE
-    COMPLETED
-    CANCELLED
+    Active
+    Completed
+    Cancelled
   }
 
   type ParkingLotInfo {
@@ -142,7 +168,8 @@ const resolvers = {
             if (!context.user) throw new Error("Unauthorized");
             const doc = await adminDb.collection('users').doc(context.user.uid).get();
             if (!doc.exists) return null;
-            return { uid: context.user.uid, ...doc.data() };
+            // Add uid to the returned data, as it's the doc id.
+            return { uid: doc.id, ...doc.data() };
         },
         parkingLots: async (_: any, __: any, context: ContextValue) => {
             if (!context.user) throw new Error("Unauthorized");
@@ -167,36 +194,57 @@ const resolvers = {
             });
         },
         allUsers: async (_: any, __: any, context: ContextValue) => {
-            if (context.user?.role !== 'admin') throw new Error("Forbidden");
-            const snapshot = await adminDb.collection('users').get();
-            return snapshot.docs.map(doc => ({ uid: doc.id, ...doc.data() }));
+            if (context.user?.role !== 'admin') throw new Error("Forbidden: Admins only");
+            
+            const allAuthUsers = await getAllAuthUsers();
+            
+            const usersFromDb = await adminDb.collection('users').get();
+            const dbDataByUid = new Map(usersFromDb.docs.map(doc => [doc.id, doc.data()]));
+
+            return allAuthUsers.map(userRecord => {
+                const dbUser = dbDataByUid.get(userRecord.uid) || {};
+                return {
+                  uid: userRecord.uid,
+                  email: userRecord.email,
+                  name: dbUser.name || 'N/A',
+                  role: userRecord.customClaims?.role || 'customer',
+                  vehicles: dbUser.vehicles || [],
+                };
+            });
         },
         adminStats: async (_: any, __: any, context: ContextValue) => {
-            if (context.user?.role !== 'admin') throw new Error("Forbidden");
-            const [users, lots, active, completed] = await Promise.all([
-                adminDb.collection('users').get(),
-                adminDb.collection('parkingLots').get(),
-                adminDb.collection('bookings').where('status', '==', BookingStatus.ACTIVE).get(),
-                adminDb.collection('bookings').where('status', '==', BookingStatus.COMPLETED).get()
+            if (context.user?.role !== 'admin') throw new Error("Forbidden: Admins only");
+            
+            const allAuthUsers = await getAllAuthUsers();
+            
+            const [lots, active, completed] = await Promise.all([
+                adminDb.collection('parkingLots').count().get().then(snap => snap.data().count),
+                adminDb.collection('bookings').where('status', '==', BookingStatus.ACTIVE).count().get().then(snap => snap.data().count),
+                adminDb.collection('bookings').where('status', '==', BookingStatus.COMPLETED).count().get().then(snap => snap.data().count),
             ]);
-            return {
-                totalUsers: users.size,
-                totalLots: lots.size,
-                activeBookings: active.size,
-                completedBookings: completed.size,
-            };
+            return { totalUsers: allAuthUsers.length, totalLots: lots, activeBookings: active, completedBookings: completed };
         },
     },
     Mutation: {
-        setupProfile: async (_: any, { name, vehicle }: { name: string, vehicle: any }, context: ContextValue) => {
+        setupProfile: async (_: any, { name, vehicle }: { name: string, vehicle: Vehicle }, context: ContextValue) => {
             if (!context.user) throw new Error("Unauthorized");
             const userRef = adminDb.collection('users').doc(context.user.uid);
-            await userRef.set({ name, vehicles: [vehicle] }, { merge: true });
+            
+            // Atomically create the user document with initial role and profile info.
+            await userRef.set({ 
+                name, 
+                vehicles: [vehicle], 
+                role: 'customer', // Explicitly set role on profile setup
+                email: (await adminAuth.getUser(context.user.uid)).email
+            }, { merge: true });
+
+            await adminAuth.setCustomUserClaims(context.user.uid, { role: 'customer' });
+
             const doc = await userRef.get();
             return { uid: context.user.uid, ...doc.data() };
         },
         addParkingLot: async (_: any, args: any, context: ContextValue) => {
-             if (context.user?.role !== 'admin' && context.user?.role !== 'operator') throw new Error("Forbidden");
+             if (context.user?.role !== 'admin' && context.user?.role !== 'operator') throw new Error("Forbidden: Operators or Admins only");
             const { name, address, totalSlots, pricePerHour, lat, lng, slotPrefix } = args;
             const slotsMap: { [key: string]: "available" | "occupied" } = {};
             for (let i = 1; i <= totalSlots; i++) {
@@ -237,7 +285,7 @@ const resolvers = {
             });
         },
         verifyBooking: async (_: any, { bookingId }: { bookingId: string }, context: ContextValue) => {
-            if (context.user?.role !== 'admin' && context.user?.role !== 'operator') throw new Error("Forbidden");
+            if (context.user?.role !== 'admin' && context.user?.role !== 'operator') throw new Error("Forbidden: Operators or Admins only");
             const bookingRef = adminDb.collection('bookings').doc(bookingId);
             try {
                  let slotNumber = '';
@@ -258,12 +306,12 @@ const resolvers = {
             }
         },
         updateUserRole: async (_: any, { uid, role }: {uid: string, role: string}, context: ContextValue) => {
-            if (context.user?.role !== 'admin') throw new Error("Forbidden");
+            if (context.user?.role !== 'admin') throw new Error("Forbidden: Admins only");
             if (!['customer', 'operator', 'admin'].includes(role)) throw new Error("Invalid role specified.");
 
+            await adminAuth.setCustomUserClaims(uid, { role });
             const userRef = adminDb.collection('users').doc(uid);
             await userRef.update({ role });
-            await adminAuth.setCustomUserClaims(uid, { role });
             
             const doc = await userRef.get();
             return { uid, ...doc.data() };
@@ -279,15 +327,11 @@ const server = new ApolloServer<ContextValue>({
   resolvers,
 });
 
-// We need to start the server before we can use it
 server.startInBackgroundHandlingStartupErrorsByLoggingAndFailingAllRequests();
-
-// Create the express app
 const app = express();
 
-// Define the context function for Express
-// FIX: Use explicit Request type to fix req.headers error.
-const createContext = async ({ req }: { req: Request }): Promise<ContextValue> => {
+// FIX: Change Request to express.Request to avoid type conflicts and fix related errors.
+const createContext = async ({ req }: { req: express.Request }): Promise<ContextValue> => {
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
         const token = authHeader.split('Bearer ')[1];
@@ -295,23 +339,30 @@ const createContext = async ({ req }: { req: Request }): Promise<ContextValue> =
             const decodedToken = await adminAuth.verifyIdToken(token);
             return { user: { uid: decodedToken.uid, role: (decodedToken.role as string) || 'customer' } };
         } catch (error) {
-            // Invalid token, proceed without user context
+            console.warn('Invalid auth token:', error);
             return {};
         }
     }
     return {};
 };
 
-// Setup middleware
-// FIX: Specify path for middleware and use express.json() to resolve overload error.
-app.use(
-    '/',
-    cors(),
-    express.json(),
-    expressMiddleware(server, {
+// Vercel exports a handler function as the default export
+// FIX: Change Request and Response to express.Request and express.Response to fix type errors.
+export default async function handler(req: express.Request, res: express.Response) {
+    const middleware = expressMiddleware(server, {
         context: createContext,
-    }),
-);
-
-// Vercel will automatically handle routing the request to this express app
-export default app;
+    });
+    
+    // Setup CORS and JSON parsing, then run the Apollo middleware.
+    // This structure is required for Vercel's serverless environment.
+    cors<cors.CorsRequest>()(req, res, () => {
+        express.json()(req, res, () => {
+            middleware(req, res, (err) => {
+                if (err) {
+                    console.error('Middleware error:', err);
+                    res.status(500).send('Internal Server Error');
+                }
+            });
+        });
+    });
+}
