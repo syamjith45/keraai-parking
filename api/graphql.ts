@@ -1,10 +1,28 @@
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
-// FIX: Using namespace import for express to resolve type conflicts with global Request/Response types.
-import * as express from 'express';
+import express from 'express';
 import cors from 'cors';
 import * as admin from 'firebase-admin';
-import { BookingStatus, Vehicle, VehicleType } from '../src/types';
+// Fix: Import Node.js http types for Vercel's handler signature.
+import type { IncomingMessage, ServerResponse } from 'http';
+
+// Types duplicated from ../src/types to avoid build issues in Vercel.
+enum VehicleType {
+  TWO_WHEELER = 'TWO_WHEELER',
+  FOUR_WHEELER = 'FOUR_WHEELER',
+  SUV = 'SUV'
+}
+
+interface Vehicle {
+  registrationNumber: string;
+  type: VehicleType;
+}
+
+enum BookingStatus {
+  ACTIVE = 'Active',
+  COMPLETED = 'Completed',
+  CANCELLED = 'Cancelled'
+}
 
 // --- Firebase Admin Initialization ---
 // This now correctly uses the separate environment variables you've set in Vercel.
@@ -320,6 +338,7 @@ const resolvers = {
 };
 
 
+// Fix: Refactor to use a proper Express app to handle middleware, which resolves all type errors.
 // --- Apollo Server Setup with Express ---
 
 const server = new ApolloServer<ContextValue>({
@@ -327,11 +346,12 @@ const server = new ApolloServer<ContextValue>({
   resolvers,
 });
 
+// This must be called once per instance, so we do it outside the handler.
 server.startInBackgroundHandlingStartupErrorsByLoggingAndFailingAllRequests();
-const app = express();
 
-// FIX: Change Request to express.Request to avoid type conflicts and fix related errors.
+// This function will be called by Vercel for every request
 const createContext = async ({ req }: { req: express.Request }): Promise<ContextValue> => {
+    // Fix: The req object is now a proper express.Request, so req.headers exists.
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
         const token = authHeader.split('Bearer ')[1];
@@ -346,23 +366,15 @@ const createContext = async ({ req }: { req: express.Request }): Promise<Context
     return {};
 };
 
-// Vercel exports a handler function as the default export
-// FIX: Change Request and Response to express.Request and express.Response to fix type errors.
-export default async function handler(req: express.Request, res: express.Response) {
-    const middleware = expressMiddleware(server, {
-        context: createContext,
-    });
-    
-    // Setup CORS and JSON parsing, then run the Apollo middleware.
-    // This structure is required for Vercel's serverless environment.
-    cors<cors.CorsRequest>()(req, res, () => {
-        express.json()(req, res, () => {
-            middleware(req, res, (err) => {
-                if (err) {
-                    console.error('Middleware error:', err);
-                    res.status(500).send('Internal Server Error');
-                }
-            });
-        });
-    });
-}
+const app = express();
+
+// Setup CORS and JSON parsing, then run the Apollo middleware.
+app.use(cors());
+app.use(express.json());
+app.use(expressMiddleware(server, {
+    context: createContext,
+}));
+
+// Vercel can handle an express app instance as the default export.
+// This is the standard way to run an Express-based API on Vercel.
+export default app;
