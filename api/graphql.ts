@@ -1,5 +1,6 @@
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
+// FIX: Changed import from `require` to ES module syntax to fix module resolution errors.
 import express from 'express';
 import cors from 'cors';
 import * as admin from 'firebase-admin';
@@ -377,9 +378,9 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
-// FIX: Added a path '/' to app.use to help TypeScript resolve the correct overload.
-// This resolves the error "Argument of type 'NextHandleFunction' is not assignable to parameter of type 'PathParams'".
-// Fixing this also resolves the type inference for `req` in `createContext`, fixing the `req.headers` error.
+// FIX: Added a path '/' to app.use to help TypeScript resolve the correct overload for expressMiddleware.
+// This resolves the error "Argument of type 'NextHandleFunction' is not assignable to parameter of type 'PathParams'"
+// and ensures correct type inference for `req` in the context function, fixing the `req.headers` error.
 app.use('/', expressMiddleware(server, {
     context: createContext,
 }));
