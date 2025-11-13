@@ -1,8 +1,4 @@
 
-
-
-
-
 import { ApolloServer } from '@apollo/server';
 // FIX: Import `ExpressContextFunctionArgument` to correctly type the context creation function.
 import { expressMiddleware, ExpressContextFunctionArgument } from '@apollo/server/express4';
@@ -13,7 +9,7 @@ import * as admin from 'firebase-admin';
 
 // Define required types locally to avoid dependency on the `src` directory.
 export enum BookingStatus {
-  ACTIVE = 'Active',
+  ACTIVE = 'ACTIVE',
   COMPLETED = 'Completed',
   CANCELLED = 'Cancelled'
 }
