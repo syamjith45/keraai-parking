@@ -1,4 +1,8 @@
 
+
+
+
+
 import { ApolloServer } from '@apollo/server';
 // FIX: Import `ExpressContextFunctionArgument` to correctly type the context creation function.
 import { expressMiddleware, ExpressContextFunctionArgument } from '@apollo/server/express4';
@@ -173,12 +177,29 @@ interface ContextValue {
 
 // --- GraphQL Resolvers ---
 const resolvers = {
+    // FIX: Add a resolver for the Vehicle type to handle legacy data.
+    // This maps old string values (e.g., "2-Wheeler") from Firestore
+    // to the correct GraphQL enum values (e.g., "TWO_WHEELER").
+    Vehicle: {
+        type: (parent: { type: string }) => {
+            switch (parent.type) {
+                case '2-Wheeler':
+                    return 'TWO_WHEELER';
+                case '4-Wheeler':
+                    return 'FOUR_WHEELER';
+                default:
+                    return parent.type; // Assumes 'SUV' and other correct values pass through.
+            }
+        },
+    },
     Query: {
         me: async (_: any, __: any, context: ContextValue) => {
             if (!context.user) throw new Error("Unauthorized");
             const doc = await adminDb.collection('users').doc(context.user.uid).get();
             if (!doc.exists) return null;
-            return { uid: context.user.uid, ...doc.data() };
+            const data = doc.data()!;
+            // FIX: Provide a default role to prevent errors for users without one.
+            return { uid: context.user.uid, ...data, role: data.role || 'customer' };
         },
         parkingLots: async (_: any, __: any, context: ContextValue) => {
             if (!context.user) throw new Error("Unauthorized");
@@ -205,7 +226,16 @@ const resolvers = {
         allUsers: async (_: any, __: any, context: ContextValue) => {
             if (context.user?.role !== 'admin') throw new Error("Forbidden");
             const snapshot = await adminDb.collection('users').get();
-            return snapshot.docs.map(doc => ({ uid: doc.id, ...doc.data() }));
+            // FIX: Map over users and provide a default role if it's missing.
+            // This prevents "Cannot return null for non-nullable field" errors for legacy users.
+            return snapshot.docs.map(doc => {
+                const data = doc.data();
+                return { 
+                    uid: doc.id, 
+                    ...data,
+                    role: data.role || 'customer',
+                };
+            });
         },
         adminStats: async (_: any, __: any, context: ContextValue) => {
             if (context.user?.role !== 'admin') throw new Error("Forbidden");
@@ -365,15 +395,18 @@ const createContext = async ({ req }: ExpressContextFunctionArgument): Promise<C
 // Setup middleware
 // FIX: Explicitly add CORS and JSON body-parsing middleware before Apollo Server.
 // This is required by Apollo Server v4 and resolves the 'req.body is not set' error.
-// FIX: Combined middleware into a single app.use call to resolve potential overload resolution issues, aligning with Apollo Server documentation.
+// FIX: Splitting middleware into separate `app.use` calls to avoid a complex
+// TypeScript overload resolution error that can occur with multiple handlers in a
+// single call, especially in projects with conflicting global types.
+app.use(cors());
+app.use(express.json());
 app.use(
     '/',
-    cors(),
-    express.json(),
     expressMiddleware(server, {
         context: createContext,
-    }),
+    })
 );
+
 
 // Vercel will automatically handle routing the request to this express app
 export default app;
