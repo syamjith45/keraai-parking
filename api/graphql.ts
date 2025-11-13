@@ -1,10 +1,11 @@
 
+
 import { ApolloServer } from '@apollo/server';
 // FIX: Import `ExpressContextFunctionArgument` to correctly type the context creation function.
 import { expressMiddleware, ExpressContextFunctionArgument } from '@apollo/server/express4';
 // FIX: Import 'express' directly to avoid type conflicts with the global 'Request' type.
 import express from 'express';
-// FIX: body-parser is deprecated and not needed with Apollo Server v4.
+import cors from 'cors';
 import * as admin from 'firebase-admin';
 
 // Define required types locally to avoid dependency on the `src` directory.
@@ -356,9 +357,11 @@ const createContext = async ({ req }: ExpressContextFunctionArgument): Promise<C
 };
 
 // Setup middleware
-// FIX: The `expressMiddleware` function from `@apollo/server/express4` includes CORS and JSON body-parsing by default.
-// The previous implementation was causing a TypeScript type error. Relying on the built-in handlers
-// simplifies the code and resolves the error.
+// FIX: Explicitly add CORS and JSON body-parsing middleware before Apollo Server.
+// This is required by Apollo Server v4 and resolves the 'req.body is not set' error.
+// FIX: Split app.use calls to avoid potential type inference issues when passing multiple middlewares in a single call.
+app.use(cors());
+app.use(express.json());
 app.use(
     '/',
     expressMiddleware(server, {
