@@ -1,6 +1,7 @@
 
 import { ApolloServer } from '@apollo/server';
-import { expressMiddleware } from '@apollo/server/express4';
+// FIX: Import `ExpressContextFunctionArgument` to correctly type the context creation function.
+import { expressMiddleware, ExpressContextFunctionArgument } from '@apollo/server/express4';
 // FIX: Import 'express' directly to avoid type conflicts with the global 'Request' type.
 import express from 'express';
 import cors from 'cors';
@@ -310,9 +311,9 @@ server.startInBackgroundHandlingStartupErrorsByLoggingAndFailingAllRequests();
 const app = express();
 
 // Define the context function for Express
-// FIX: Use 'express.Request' to explicitly specify the type from the express package,
-// preventing conflicts with the global 'Request' type and resolving type errors.
-const createContext = async ({ req }: { req: express.Request }): Promise<ContextValue> => {
+// FIX: Use `ExpressContextFunctionArgument` from `@apollo/server/express4` to ensure the `req` object
+// is correctly typed as `express.Request`, resolving type conflicts with the global `Request` type.
+const createContext = async ({ req }: ExpressContextFunctionArgument): Promise<ContextValue> => {
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
         const token = authHeader.split('Bearer ')[1];
