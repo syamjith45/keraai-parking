@@ -4,7 +4,6 @@ import { ApolloServer } from '@apollo/server';
 import { expressMiddleware, ExpressContextFunctionArgument } from '@apollo/server/express4';
 // FIX: Import 'express' directly to avoid type conflicts with the global 'Request' type.
 import express from 'express';
-import cors from 'cors';
 // FIX: body-parser is deprecated and not needed with Apollo Server v4.
 import * as admin from 'firebase-admin';
 
@@ -17,26 +16,37 @@ export enum BookingStatus {
 
 // --- Firebase Admin Initialization ---
 if (!admin.apps.length) {
-  // Construct the service account object from individual environment variables,
-  // which is a common pattern for platforms like Vercel.
-  const { FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY } = process.env;
+  const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
 
-  if (FIREBASE_PROJECT_ID && FIREBASE_CLIENT_EMAIL && FIREBASE_PRIVATE_KEY) {
+  if (serviceAccountBase64) {
     try {
+      const serviceAccountJson = Buffer.from(serviceAccountBase64, 'base64').toString('utf8');
+      const serviceAccount = JSON.parse(serviceAccountJson);
       admin.initializeApp({
-        credential: admin.credential.cert({
-          projectId: FIREBASE_PROJECT_ID,
-          clientEmail: FIREBASE_CLIENT_EMAIL,
-          // Vercel escapes newlines in env vars. We need to un-escape them for the private key.
-          privateKey: FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-        }),
+        credential: admin.credential.cert(serviceAccount),
       });
     } catch (error: any) {
-      console.error('Firebase admin initialization error from individual env vars:', error.stack);
+      console.error('Firebase admin initialization error from base64 env var:', error.stack);
     }
   } else {
-    // Fallback for the original single JSON variable method, in case it's used elsewhere.
-    console.error('FATAL: Firebase Admin SDK credentials not found. Please set the FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY environment variables in your Vercel project settings.');
+    // Fallback to previous method for local dev or other setups
+    const { FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY } = process.env;
+
+    if (FIREBASE_PROJECT_ID && FIREBASE_CLIENT_EMAIL && FIREBASE_PRIVATE_KEY) {
+      try {
+        admin.initializeApp({
+          credential: admin.credential.cert({
+            projectId: FIREBASE_PROJECT_ID,
+            clientEmail: FIREBASE_CLIENT_EMAIL,
+            privateKey: FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+          }),
+        });
+      } catch (error: any) {
+        console.error('Firebase admin initialization error from individual env vars:', error.stack);
+      }
+    } else {
+      console.error('FATAL: Firebase Admin SDK credentials not found. Please set FIREBASE_SERVICE_ACCOUNT_BASE64 or individual FIREBASE_* environment variables in your Vercel project settings.');
+    }
   }
 }
 
@@ -157,6 +167,7 @@ interface ContextValue {
     user?: {
         uid: string;
         role: string;
+        email?: string;
     }
 }
 
@@ -216,7 +227,19 @@ const resolvers = {
         setupProfile: async (_: any, { name, vehicle }: { name: string, vehicle: any }, context: ContextValue) => {
             if (!context.user) throw new Error("Unauthorized");
             const userRef = adminDb.collection('users').doc(context.user.uid);
-            await userRef.set({ name, vehicles: [vehicle] }, { merge: true });
+            
+            // Ensure email and a default role are set when creating the profile.
+            // This guarantees the document contains all non-nullable fields required by the GraphQL schema.
+            const profileData = {
+                name,
+                vehicles: [vehicle],
+                email: context.user.email, // Get email from context
+                role: 'customer', // Assign default role
+            };
+
+            await userRef.set(profileData, { merge: true });
+            
+            // The newly created/updated document now contains the email and role.
             const doc = await userRef.get();
             return { uid: context.user.uid, ...doc.data() };
         },
@@ -319,7 +342,11 @@ const createContext = async ({ req }: ExpressContextFunctionArgument): Promise<C
         const token = authHeader.split('Bearer ')[1];
         try {
             const decodedToken = await adminAuth.verifyIdToken(token);
-            return { user: { uid: decodedToken.uid, role: (decodedToken.role as string) || 'customer' } };
+            return { user: { 
+                uid: decodedToken.uid, 
+                role: (decodedToken.role as string) || 'customer',
+                email: decodedToken.email
+            } };
         } catch (error) {
             // Invalid token, proceed without user context
             return {};
@@ -329,12 +356,11 @@ const createContext = async ({ req }: ExpressContextFunctionArgument): Promise<C
 };
 
 // Setup middleware
-// FIX: Use a valid signature for app.use by providing a path. `express.json()` is used for body parsing.
+// FIX: The `expressMiddleware` function from `@apollo/server/express4` includes CORS and JSON body-parsing by default.
+// The previous implementation was causing a TypeScript type error. Relying on the built-in handlers
+// simplifies the code and resolves the error.
 app.use(
     '/',
-    cors(),
-    // FIX: Explicitly cast express.json() to resolve a type inference issue with app.use overloads.
-    express.json() as express.RequestHandler,
     expressMiddleware(server, {
         context: createContext,
     }),
