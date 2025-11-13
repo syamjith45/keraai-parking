@@ -1,10 +1,8 @@
 
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
-// FIX: Import Request from express to get correct types for the request object.
-// The previous attempt to use a default import was not sufficient. An explicit named import
-// of `Request` is necessary to resolve the type conflict with the global `Request` type.
-import express, { Request } from 'express';
+// FIX: Import 'express' directly to avoid type conflicts with the global 'Request' type.
+import express from 'express';
 import cors from 'cors';
 // FIX: body-parser is deprecated and not needed with Apollo Server v4.
 import * as admin from 'firebase-admin';
@@ -18,24 +16,29 @@ export enum BookingStatus {
 
 // --- Firebase Admin Initialization ---
 if (!admin.apps.length) {
-  const serviceAccountJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (!serviceAccountJson) {
-      console.error('FATAL: GOOGLE_SERVICE_ACCOUNT_JSON environment variable is not set. Please add it to your Vercel project settings.');
-  } else {
+  // Construct the service account object from individual environment variables,
+  // which is a common pattern for platforms like Vercel.
+  const { FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY } = process.env;
+
+  if (FIREBASE_PROJECT_ID && FIREBASE_CLIENT_EMAIL && FIREBASE_PRIVATE_KEY) {
     try {
-      const serviceAccount = JSON.parse(serviceAccountJson);
-      // Vercel might escape newlines in env vars. We need to un-escape them for the private key.
-      if (serviceAccount.private_key) {
-          serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
-      }
       admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
+        credential: admin.credential.cert({
+          projectId: FIREBASE_PROJECT_ID,
+          clientEmail: FIREBASE_CLIENT_EMAIL,
+          // Vercel escapes newlines in env vars. We need to un-escape them for the private key.
+          privateKey: FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        }),
       });
     } catch (error: any) {
-      console.error('Firebase admin initialization error: Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON.', error.stack);
+      console.error('Firebase admin initialization error from individual env vars:', error.stack);
     }
+  } else {
+    // Fallback for the original single JSON variable method, in case it's used elsewhere.
+    console.error('FATAL: Firebase Admin SDK credentials not found. Please set the FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY environment variables in your Vercel project settings.');
   }
 }
+
 
 const adminDb = admin.firestore();
 const adminAuth = admin.auth();
@@ -307,8 +310,9 @@ server.startInBackgroundHandlingStartupErrorsByLoggingAndFailingAllRequests();
 const app = express();
 
 // Define the context function for Express
-// FIX: Use the explicitly imported `Request` type from express to fix type error on `req.headers`.
-const createContext = async ({ req }: { req: Request }): Promise<ContextValue> => {
+// FIX: Use 'express.Request' to explicitly specify the type from the express package,
+// preventing conflicts with the global 'Request' type and resolving type errors.
+const createContext = async ({ req }: { req: express.Request }): Promise<ContextValue> => {
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
         const token = authHeader.split('Bearer ')[1];
