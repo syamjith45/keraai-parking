@@ -2,8 +2,9 @@
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
 // FIX: Import Request from express to get correct types for the request object.
-// Use the default export to avoid ambiguity with the global Request type.
-import express from 'express';
+// The previous attempt to use a default import was not sufficient. An explicit named import
+// of `Request` is necessary to resolve the type conflict with the global `Request` type.
+import express, { Request } from 'express';
 import cors from 'cors';
 // FIX: body-parser is deprecated and not needed with Apollo Server v4.
 import * as admin from 'firebase-admin';
@@ -17,19 +18,25 @@ export enum BookingStatus {
 
 // --- Firebase Admin Initialization ---
 if (!admin.apps.length) {
-  try {
-    const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON as string);
-    // Vercel might escape newlines in env vars. We need to un-escape them for the private key.
-    if (serviceAccount.private_key) {
-        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+  const serviceAccountJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!serviceAccountJson) {
+      console.error('FATAL: GOOGLE_SERVICE_ACCOUNT_JSON environment variable is not set. Please add it to your Vercel project settings.');
+  } else {
+    try {
+      const serviceAccount = JSON.parse(serviceAccountJson);
+      // Vercel might escape newlines in env vars. We need to un-escape them for the private key.
+      if (serviceAccount.private_key) {
+          serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+      }
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+      });
+    } catch (error: any) {
+      console.error('Firebase admin initialization error: Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON.', error.stack);
     }
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-    });
-  } catch (error: any) {
-    console.error('Firebase admin initialization error', error.stack);
   }
 }
+
 const adminDb = admin.firestore();
 const adminAuth = admin.auth();
 
@@ -300,8 +307,8 @@ server.startInBackgroundHandlingStartupErrorsByLoggingAndFailingAllRequests();
 const app = express();
 
 // Define the context function for Express
-// FIX: Use `express.Request` type from express for `req` to fix type error on `req.headers`.
-const createContext = async ({ req }: { req: express.Request }): Promise<ContextValue> => {
+// FIX: Use the explicitly imported `Request` type from express to fix type error on `req.headers`.
+const createContext = async ({ req }: { req: Request }): Promise<ContextValue> => {
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
         const token = authHeader.split('Bearer ')[1];
