@@ -1,35 +1,15 @@
 {
-  "name": "keraai-local",
+  "name": "keraai-api",
   "private": true,
-  "version": "0.0.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview"
-  },
-  "engines": {
-    "node": "22.x"
-  },
+  "version": "1.0.0",
   "dependencies": {
     "@apollo/server": "^4.10.4",
-    "@stripe/react-stripe-js": "^2.7.3",
-    "@stripe/stripe-js": "^4.1.0",
-    "body-parser": "^1.20.2",
-    "cors": "^2.8.5",
     "express": "^4.19.2",
     "firebase-admin": "^12.1.0",
-    "graphql": "^16.9.0",
-    "html5-qrcode": "^2.3.8",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "graphql": "^16.9.0"
   },
   "devDependencies": {
-    "@types/react": "^18.2.0",
-    "@types/react-dom": "^18.2.0",
     "@vercel/node": "^3.2.0",
-    "@vitejs/plugin-react": "^4.0.3",
-    "typescript": "^5.0.2",
-    "vite": "^4.4.5"
+    "typescript": "^5.0.2"
   }
 }
