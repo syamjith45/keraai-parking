@@ -1,10 +1,19 @@
+
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
+// FIX: Import Request from express to get correct types for the request object.
+// Use the default export to avoid ambiguity with the global Request type.
 import express from 'express';
 import cors from 'cors';
-import bodyParser from 'body-parser';
+// FIX: body-parser is deprecated and not needed with Apollo Server v4.
 import * as admin from 'firebase-admin';
-import { BookingStatus } from '../types';
+
+// Define required types locally to avoid dependency on the `src` directory.
+export enum BookingStatus {
+  ACTIVE = 'Active',
+  COMPLETED = 'Completed',
+  CANCELLED = 'Cancelled'
+}
 
 // --- Firebase Admin Initialization ---
 if (!admin.apps.length) {
@@ -291,6 +300,7 @@ server.startInBackgroundHandlingStartupErrorsByLoggingAndFailingAllRequests();
 const app = express();
 
 // Define the context function for Express
+// FIX: Use `express.Request` type from express for `req` to fix type error on `req.headers`.
 const createContext = async ({ req }: { req: express.Request }): Promise<ContextValue> => {
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -307,9 +317,11 @@ const createContext = async ({ req }: { req: express.Request }): Promise<Context
 };
 
 // Setup middleware
+// FIX: Use a valid signature for app.use by providing a path. `express.json()` is used for body parsing.
 app.use(
+    '/',
     cors(),
-    bodyParser.json(),
+    express.json(),
     expressMiddleware(server, {
         context: createContext,
     }),
