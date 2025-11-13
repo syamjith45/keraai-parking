@@ -1,66 +1,28 @@
 import { ApolloServer } from '@apollo/server';
 import { expressMiddleware } from '@apollo/server/express4';
-import express, { Request } from 'express';
+import express from 'express';
 import cors from 'cors';
+import bodyParser from 'body-parser';
 import * as admin from 'firebase-admin';
-
-// Types duplicated from ../src/types to avoid build issues in Vercel.
-enum VehicleType {
-  TWO_WHEELER = 'TWO_WHEELER',
-  FOUR_WHEELER = 'FOUR_WHEELER',
-  SUV = 'SUV'
-}
-
-interface Vehicle {
-  registrationNumber: string;
-  type: VehicleType;
-}
-
-enum BookingStatus {
-  ACTIVE = 'Active',
-  COMPLETED = 'Completed',
-  CANCELLED = 'Cancelled'
-}
+import { BookingStatus } from '../types';
 
 // --- Firebase Admin Initialization ---
-let adminDb: admin.firestore.Firestore;
-let adminAuth: admin.auth.Auth;
-
-function initializeFirebaseAdmin() {
-    if (admin.apps.length) {
-        adminDb = admin.firestore();
-        adminAuth = admin.auth();
-        return;
+if (!admin.apps.length) {
+  try {
+    const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON as string);
+    // Vercel might escape newlines in env vars. We need to un-escape them for the private key.
+    if (serviceAccount.private_key) {
+        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
     }
-    
-    try {
-        const serviceAccount = {
-            projectId: process.env.FIREBASE_PROJECT_ID,
-            clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-            privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
-        };
-        
-        if (!serviceAccount.projectId || !serviceAccount.clientEmail || !serviceAccount.privateKey) {
-            throw new Error("Firebase admin environment variables are not completely set in Vercel. Please check FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY.");
-        }
-
-        admin.initializeApp({
-            credential: admin.credential.cert(serviceAccount),
-        });
-        
-        adminDb = admin.firestore();
-        adminAuth = admin.auth();
-        console.log("Firebase Admin SDK initialized successfully.");
-
-    } catch (error: any) {
-        console.error('CRITICAL: Firebase admin initialization failed.', error);
-        // This throw will prevent the server from starting and will cause a clear crash log.
-        throw new Error(`Firebase admin initialization failed: ${error.message}`);
-    }
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+  } catch (error: any) {
+    console.error('Firebase admin initialization error', error.stack);
+  }
 }
-
-// Initialize Firebase Admin SDK on module load. A failure here will crash the function on cold start.
-initializeFirebaseAdmin();
+const adminDb = admin.firestore();
+const adminAuth = admin.auth();
 
 
 // --- GraphQL Schema Definition ---
@@ -117,9 +79,9 @@ const typeDefs = `#graphql
   }
   
   enum BookingStatus {
-    Active
-    Completed
-    Cancelled
+    ACTIVE
+    COMPLETED
+    CANCELLED
   }
 
   type ParkingLotInfo {
@@ -178,20 +140,6 @@ interface ContextValue {
     }
 }
 
-// --- Helper function to get all auth users with pagination ---
-const getAllAuthUsers = async (): Promise<admin.auth.UserRecord[]> => {
-    const allUsers: admin.auth.UserRecord[] = [];
-    let pageToken: string | undefined;
-
-    do {
-        const listUsersResult = await adminAuth.listUsers(1000, pageToken);
-        allUsers.push(...listUsersResult.users);
-        pageToken = listUsersResult.pageToken;
-    } while (pageToken);
-
-    return allUsers;
-};
-
 // --- GraphQL Resolvers ---
 const resolvers = {
     Query: {
@@ -199,14 +147,14 @@ const resolvers = {
             if (!context.user) throw new Error("Unauthorized");
             const doc = await adminDb.collection('users').doc(context.user.uid).get();
             if (!doc.exists) return null;
-            return { uid: doc.id, ...doc.data() };
+            return { uid: context.user.uid, ...doc.data() };
         },
         parkingLots: async (_: any, __: any, context: ContextValue) => {
             if (!context.user) throw new Error("Unauthorized");
             const snapshot = await adminDb.collection('parkingLots').get();
             return snapshot.docs.map(doc => {
                 const data = doc.data();
-                const slots = Object.entries(data.slots || {}).map(([id, status]) => ({ id, status: status as string }));
+                const slots = Object.entries(data.slots || {}).map(([id, status]) => ({ id, status }));
                 return { id: doc.id, ...data, slots };
             });
         },
@@ -224,56 +172,36 @@ const resolvers = {
             });
         },
         allUsers: async (_: any, __: any, context: ContextValue) => {
-            if (context.user?.role !== 'admin') throw new Error("Forbidden: Admins only");
-            
-            const allAuthUsers = await getAllAuthUsers();
-            
-            const usersFromDb = await adminDb.collection('users').get();
-            const dbDataByUid = new Map(usersFromDb.docs.map(doc => [doc.id, doc.data()]));
-
-            return allAuthUsers.map(userRecord => {
-                const dbUser = dbDataByUid.get(userRecord.uid) || {};
-                return {
-                  uid: userRecord.uid,
-                  email: userRecord.email,
-                  name: dbUser.name || 'N/A',
-                  role: userRecord.customClaims?.role || 'customer',
-                  vehicles: dbUser.vehicles || [],
-                };
-            });
+            if (context.user?.role !== 'admin') throw new Error("Forbidden");
+            const snapshot = await adminDb.collection('users').get();
+            return snapshot.docs.map(doc => ({ uid: doc.id, ...doc.data() }));
         },
         adminStats: async (_: any, __: any, context: ContextValue) => {
-            if (context.user?.role !== 'admin') throw new Error("Forbidden: Admins only");
-            
-            const allAuthUsers = await getAllAuthUsers();
-            
-            const [lots, active, completed] = await Promise.all([
-                adminDb.collection('parkingLots').count().get().then(snap => snap.data().count),
-                adminDb.collection('bookings').where('status', '==', BookingStatus.ACTIVE).count().get().then(snap => snap.data().count),
-                adminDb.collection('bookings').where('status', '==', BookingStatus.COMPLETED).count().get().then(snap => snap.data().count),
+            if (context.user?.role !== 'admin') throw new Error("Forbidden");
+            const [users, lots, active, completed] = await Promise.all([
+                adminDb.collection('users').get(),
+                adminDb.collection('parkingLots').get(),
+                adminDb.collection('bookings').where('status', '==', BookingStatus.ACTIVE).get(),
+                adminDb.collection('bookings').where('status', '==', BookingStatus.COMPLETED).get()
             ]);
-            return { totalUsers: allAuthUsers.length, totalLots: lots, activeBookings: active, completedBookings: completed };
+            return {
+                totalUsers: users.size,
+                totalLots: lots.size,
+                activeBookings: active.size,
+                completedBookings: completed.size,
+            };
         },
     },
     Mutation: {
-        setupProfile: async (_: any, { name, vehicle }: { name: string, vehicle: Vehicle }, context: ContextValue) => {
+        setupProfile: async (_: any, { name, vehicle }: { name: string, vehicle: any }, context: ContextValue) => {
             if (!context.user) throw new Error("Unauthorized");
             const userRef = adminDb.collection('users').doc(context.user.uid);
-            
-            await userRef.set({ 
-                name, 
-                vehicles: [vehicle], 
-                role: 'customer',
-                email: (await adminAuth.getUser(context.user.uid)).email
-            }, { merge: true });
-
-            await adminAuth.setCustomUserClaims(context.user.uid, { role: 'customer' });
-
+            await userRef.set({ name, vehicles: [vehicle] }, { merge: true });
             const doc = await userRef.get();
             return { uid: context.user.uid, ...doc.data() };
         },
         addParkingLot: async (_: any, args: any, context: ContextValue) => {
-             if (context.user?.role !== 'admin' && context.user?.role !== 'operator') throw new Error("Forbidden: Operators or Admins only");
+             if (context.user?.role !== 'admin' && context.user?.role !== 'operator') throw new Error("Forbidden");
             const { name, address, totalSlots, pricePerHour, lat, lng, slotPrefix } = args;
             const slotsMap: { [key: string]: "available" | "occupied" } = {};
             for (let i = 1; i <= totalSlots; i++) {
@@ -314,7 +242,7 @@ const resolvers = {
             });
         },
         verifyBooking: async (_: any, { bookingId }: { bookingId: string }, context: ContextValue) => {
-            if (context.user?.role !== 'admin' && context.user?.role !== 'operator') throw new Error("Forbidden: Operators or Admins only");
+            if (context.user?.role !== 'admin' && context.user?.role !== 'operator') throw new Error("Forbidden");
             const bookingRef = adminDb.collection('bookings').doc(bookingId);
             try {
                  let slotNumber = '';
@@ -335,12 +263,12 @@ const resolvers = {
             }
         },
         updateUserRole: async (_: any, { uid, role }: {uid: string, role: string}, context: ContextValue) => {
-            if (context.user?.role !== 'admin') throw new Error("Forbidden: Admins only");
+            if (context.user?.role !== 'admin') throw new Error("Forbidden");
             if (!['customer', 'operator', 'admin'].includes(role)) throw new Error("Invalid role specified.");
 
-            await adminAuth.setCustomUserClaims(uid, { role });
             const userRef = adminDb.collection('users').doc(uid);
             await userRef.update({ role });
+            await adminAuth.setCustomUserClaims(uid, { role });
             
             const doc = await userRef.get();
             return { uid, ...doc.data() };
@@ -348,15 +276,22 @@ const resolvers = {
     }
 };
 
+
 // --- Apollo Server Setup with Express ---
+
 const server = new ApolloServer<ContextValue>({
   typeDefs,
   resolvers,
 });
 
+// We need to start the server before we can use it
 server.startInBackgroundHandlingStartupErrorsByLoggingAndFailingAllRequests();
 
-const createContext = async ({ req }: { req: Request }): Promise<ContextValue> => {
+// Create the express app
+const app = express();
+
+// Define the context function for Express
+const createContext = async ({ req }: { req: express.Request }): Promise<ContextValue> => {
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
         const token = authHeader.split('Bearer ')[1];
@@ -364,22 +299,21 @@ const createContext = async ({ req }: { req: Request }): Promise<ContextValue> =
             const decodedToken = await adminAuth.verifyIdToken(token);
             return { user: { uid: decodedToken.uid, role: (decodedToken.role as string) || 'customer' } };
         } catch (error) {
-            console.warn('Invalid auth token:', error);
+            // Invalid token, proceed without user context
             return {};
         }
     }
     return {};
 };
 
-const app = express();
+// Setup middleware
+app.use(
+    cors(),
+    bodyParser.json(),
+    expressMiddleware(server, {
+        context: createContext,
+    }),
+);
 
-app.use(cors());
-app.use(express.json());
-// FIX: Added a path '/' to app.use to help TypeScript resolve the correct overload for expressMiddleware.
-// This resolves the error "Argument of type 'NextHandleFunction' is not assignable to parameter of type 'PathParams'"
-// and ensures correct type inference for `req` in the context function, fixing the `req.headers` error.
-app.use('/', expressMiddleware(server, {
-    context: createContext,
-}));
-
+// Vercel will automatically handle routing the request to this express app
 export default app;
