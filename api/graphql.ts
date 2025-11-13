@@ -333,7 +333,8 @@ const createContext = async ({ req }: ExpressContextFunctionArgument): Promise<C
 app.use(
     '/',
     cors(),
-    express.json(),
+    // FIX: Explicitly cast express.json() to resolve a type inference issue with app.use overloads.
+    express.json() as express.RequestHandler,
     expressMiddleware(server, {
         context: createContext,
     }),
