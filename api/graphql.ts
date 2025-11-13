@@ -1,5 +1,4 @@
 
-
 import { ApolloServer } from '@apollo/server';
 // FIX: Import `ExpressContextFunctionArgument` to correctly type the context creation function.
 import { expressMiddleware, ExpressContextFunctionArgument } from '@apollo/server/express4';
@@ -343,12 +342,19 @@ const createContext = async ({ req }: ExpressContextFunctionArgument): Promise<C
         const token = authHeader.split('Bearer ')[1];
         try {
             const decodedToken = await adminAuth.verifyIdToken(token);
+            const userDoc = await adminDb.collection('users').doc(decodedToken.uid).get();
+
+            // Use the role from the Firestore document as the source of truth for authorization.
+            // This ensures that manual DB changes are respected and avoids token staleness issues with custom claims.
+            const role = userDoc.exists ? userDoc.data()?.role : 'customer';
+
             return { user: { 
                 uid: decodedToken.uid, 
-                role: (decodedToken.role as string) || 'customer',
+                role: role || 'customer',
                 email: decodedToken.email
             } };
         } catch (error) {
+            console.error("Auth token verification failed:", error);
             // Invalid token, proceed without user context
             return {};
         }
@@ -359,11 +365,11 @@ const createContext = async ({ req }: ExpressContextFunctionArgument): Promise<C
 // Setup middleware
 // FIX: Explicitly add CORS and JSON body-parsing middleware before Apollo Server.
 // This is required by Apollo Server v4 and resolves the 'req.body is not set' error.
-// FIX: Split app.use calls to avoid potential type inference issues when passing multiple middlewares in a single call.
-app.use(cors());
-app.use(express.json());
+// FIX: Combined middleware into a single app.use call to resolve potential overload resolution issues, aligning with Apollo Server documentation.
 app.use(
     '/',
+    cors(),
+    express.json(),
     expressMiddleware(server, {
         context: createContext,
     }),
