@@ -1,20 +1,19 @@
-
 import { ApolloServer } from '@apollo/server';
-// FIX: Import `ExpressContextFunctionArgument` to correctly type the context creation function.
 import { expressMiddleware, ExpressContextFunctionArgument } from '@apollo/server/express4';
-// FIX: Import 'express' directly to avoid type conflicts with the global 'Request' type.
 import express from 'express';
 import cors from 'cors';
 import * as admin from 'firebase-admin';
+import crypto from "crypto";
 
-// Define required types locally to avoid dependency on the `src` directory.
+// -------------------- ENUM --------------------
 export enum BookingStatus {
   ACTIVE = 'ACTIVE',
   COMPLETED = 'Completed',
-  CANCELLED = 'Cancelled'
+  CANCELLED = 'Cancelled',
+  PAID = 'PAID'
 }
 
-// --- Firebase Admin Initialization ---
+// -------------------- FIREBASE INIT --------------------
 if (!admin.apps.length) {
   const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
 
@@ -29,7 +28,6 @@ if (!admin.apps.length) {
       console.error('Firebase admin initialization error from base64 env var:', error.stack);
     }
   } else {
-    // Fallback to previous method for local dev or other setups
     const { FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY } = process.env;
 
     if (FIREBASE_PROJECT_ID && FIREBASE_CLIENT_EMAIL && FIREBASE_PRIVATE_KEY) {
@@ -42,21 +40,18 @@ if (!admin.apps.length) {
           }),
         });
       } catch (error: any) {
-        console.error('Firebase admin initialization error from individual env vars:', error.stack);
+        console.error('Firebase admin initialization error:', error.stack);
       }
-    } else {
-      console.error('FATAL: Firebase Admin SDK credentials not found. Please set FIREBASE_SERVICE_ACCOUNT_BASE64 or individual FIREBASE_* environment variables in your Vercel project settings.');
     }
   }
 }
 
-
 const adminDb = admin.firestore();
 const adminAuth = admin.auth();
 
-
-// --- GraphQL Schema Definition ---
+// -------------------- GRAPHQL SCHEMA --------------------
 const typeDefs = `#graphql
+
   enum Role {
     customer
     operator
@@ -93,8 +88,8 @@ const typeDefs = `#graphql
   }
 
   type ParkingSlot {
-      id: String!
-      status: String!
+    id: String!
+    status: String!
   }
 
   type ParkingLot {
@@ -107,11 +102,12 @@ const typeDefs = `#graphql
     coords: Coordinates!
     slots: [ParkingSlot!]!
   }
-  
+
   enum BookingStatus {
     ACTIVE
     COMPLETED
     CANCELLED
+    PAID
   }
 
   type ParkingLotInfo {
@@ -145,6 +141,22 @@ const typeDefs = `#graphql
       details: String
   }
 
+  # Payment Types
+  type PaymentOrder {
+      orderId: ID!
+      amount: Float!
+      currency: String!
+      bookingId: String!
+      status: String!
+  }
+
+  type PaymentResult {
+      success: Boolean!
+      message: String!
+      paymentId: String
+      orderId: String
+  }
+
   type Query {
     me: User
     parkingLots: [ParkingLot!]!
@@ -159,250 +171,323 @@ const typeDefs = `#graphql
     createBooking(lotId: ID!, slot: String!, duration: Int!): Booking!
     verifyBooking(bookingId: ID!): VerifyBookingResponse!
     updateUserRole(uid: ID!, role: Role!): User!
+
+    # Payment Mock Mutations
+    createPaymentOrder(bookingId: ID!): PaymentOrder!
+    payOrder(orderId: ID!): PaymentResult!
+    verifyPayment(orderId: ID!): PaymentResult!
   }
 `;
 
-// --- Type for our Context ---
+// -------------------- CONTEXT TYPE --------------------
 interface ContextValue {
-    user?: {
-        uid: string;
-        role: string;
-        email?: string;
-    }
+  user?: {
+    uid: string;
+    role: string;
+    email?: string;
+  }
 }
 
-// --- GraphQL Resolvers ---
+
+// -------------------- RESOLVERS --------------------
 const resolvers = {
-    // FIX: Add a resolver for the Vehicle type to handle legacy data.
-    // This maps old string values (e.g., "2-Wheeler") from Firestore
-    // to the correct GraphQL enum values (e.g., "TWO_WHEELER").
-    Vehicle: {
-        type: (parent: { type: string }) => {
-            switch (parent.type) {
-                case '2-Wheeler':
-                    return 'TWO_WHEELER';
-                case '4-Wheeler':
-                    return 'FOUR_WHEELER';
-                default:
-                    return parent.type; // Assumes 'SUV' and other correct values pass through.
-            }
-        },
+
+  Vehicle: {
+    type: (parent: { type: string }) => {
+      switch (parent.type) {
+        case '2-Wheeler': return 'TWO_WHEELER';
+        case '4-Wheeler': return 'FOUR_WHEELER';
+        default: return parent.type;
+      }
     },
-    Query: {
-        me: async (_: any, __: any, context: ContextValue) => {
-            if (!context.user) throw new Error("Unauthorized");
-            const doc = await adminDb.collection('users').doc(context.user.uid).get();
-            if (!doc.exists) return null;
-            const data = doc.data()!;
-            // FIX: Provide a default role to prevent errors for users without one.
-            return { uid: context.user.uid, ...data, role: data.role || 'customer' };
-        },
-        parkingLots: async (_: any, __: any, context: ContextValue) => {
-            if (!context.user) throw new Error("Unauthorized");
-            const snapshot = await adminDb.collection('parkingLots').get();
-            return snapshot.docs.map(doc => {
-                const data = doc.data();
-                const slots = Object.entries(data.slots || {}).map(([id, status]) => ({ id, status }));
-                return { id: doc.id, ...data, slots };
-            });
-        },
-        myBookings: async (_: any, __: any, context: ContextValue) => {
-            if (!context.user) throw new Error("Unauthorized");
-            const snapshot = await adminDb.collection('bookings').where('userId', '==', context.user.uid).orderBy('startTime', 'desc').get();
-            return snapshot.docs.map(doc => {
-                const data = doc.data();
-                return {
-                    id: doc.id,
-                    ...data,
-                    startTime: data.startTime.toDate().toISOString(),
-                    endTime: data.endTime.toDate().toISOString(),
-                };
-            });
-        },
-        allUsers: async (_: any, __: any, context: ContextValue) => {
-            if (context.user?.role !== 'admin') throw new Error("Forbidden");
-            const snapshot = await adminDb.collection('users').get();
-            // FIX: Map over users and provide a default role if it's missing.
-            // This prevents "Cannot return null for non-nullable field" errors for legacy users.
-            return snapshot.docs.map(doc => {
-                const data = doc.data();
-                return { 
-                    uid: doc.id, 
-                    ...data,
-                    role: data.role || 'customer',
-                };
-            });
-        },
-        adminStats: async (_: any, __: any, context: ContextValue) => {
-            if (context.user?.role !== 'admin') throw new Error("Forbidden");
-            const [users, lots, active, completed] = await Promise.all([
-                adminDb.collection('users').get(),
-                adminDb.collection('parkingLots').get(),
-                adminDb.collection('bookings').where('status', '==', BookingStatus.ACTIVE).get(),
-                adminDb.collection('bookings').where('status', '==', BookingStatus.COMPLETED).get()
-            ]);
-            return {
-                totalUsers: users.size,
-                totalLots: lots.size,
-                activeBookings: active.size,
-                completedBookings: completed.size,
-            };
-        },
+  },
+
+  Query: {
+    me: async (_: any, __: any, context: ContextValue) => {
+      if (!context.user) throw new Error("Unauthorized");
+      const doc = await adminDb.collection('users').doc(context.user.uid).get();
+      if (!doc.exists) return null;
+      const data = doc.data()!;
+      return { uid: context.user.uid, ...data, role: data.role || 'customer' };
     },
-    Mutation: {
-        setupProfile: async (_: any, { name, vehicle }: { name: string, vehicle: any }, context: ContextValue) => {
-            if (!context.user) throw new Error("Unauthorized");
-            const userRef = adminDb.collection('users').doc(context.user.uid);
-            
-            // Ensure email and a default role are set when creating the profile.
-            // This guarantees the document contains all non-nullable fields required by the GraphQL schema.
-            const profileData = {
-                name,
-                vehicles: [vehicle],
-                email: context.user.email, // Get email from context
-                role: 'customer', // Assign default role
-            };
 
-            await userRef.set(profileData, { merge: true });
-            
-            // The newly created/updated document now contains the email and role.
-            const doc = await userRef.get();
-            return { uid: context.user.uid, ...doc.data() };
-        },
-        addParkingLot: async (_: any, args: any, context: ContextValue) => {
-             if (context.user?.role !== 'admin' && context.user?.role !== 'operator') throw new Error("Forbidden");
-            const { name, address, totalSlots, pricePerHour, lat, lng, slotPrefix } = args;
-            const slotsMap: { [key: string]: "available" | "occupied" } = {};
-            for (let i = 1; i <= totalSlots; i++) {
-                slotsMap[`${slotPrefix}-${i}`] = "available";
-            }
-            const newLot = { name, address, totalSlots, pricePerHour, coords: { lat, lng }, availableSlots: totalSlots, slots: slotsMap };
-            const docRef = await adminDb.collection('parkingLots').add(newLot);
-            const slots = Object.entries(slotsMap).map(([id, status]) => ({ id, status }));
-            return { id: docRef.id, ...newLot, slots };
-        },
-        createBooking: async (_: any, { lotId, slot, duration }: {lotId: string, slot: string, duration: number}, context: ContextValue) => {
-            if (!context.user) throw new Error("Unauthorized");
-            const lotRef = adminDb.collection('parkingLots').doc(lotId);
-            const newBookingRef = adminDb.collection('bookings').doc();
+    parkingLots: async (_: any, __: any, context: ContextValue) => {
+      if (!context.user) throw new Error("Unauthorized");
+      const snapshot = await adminDb.collection('parkingLots').get();
+      return snapshot.docs.map(doc => {
+        const data = doc.data();
+        const slots = Object.entries(data.slots || {}).map(([id, status]) => ({ id, status }));
+        return { id: doc.id, ...data, slots };
+      });
+    },
 
-            return await adminDb.runTransaction(async (t) => {
-                const lotDoc = await t.get(lotRef);
-                if (!lotDoc.exists) throw new Error("Parking lot not found.");
-                const lotData = lotDoc.data()!;
-                if (lotData.slots[slot] !== 'available') throw new Error("Slot is no longer available.");
-                
-                const startTime = new Date();
-                const endTime = new Date(startTime.getTime() + duration * 3600 * 1000);
+    myBookings: async (_: any, __: any, context: ContextValue) => {
+      if (!context.user) throw new Error("Unauthorized");
+      const snapshot = await adminDb
+        .collection('bookings')
+        .where('userId', '==', context.user.uid)
+        .orderBy('startTime', 'desc')
+        .get();
 
-                const booking = {
-                    userId: context.user!.uid, lotId, slotNumber: slot,
-                    startTime: admin.firestore.Timestamp.fromDate(startTime),
-                    endTime: admin.firestore.Timestamp.fromDate(endTime),
-                    durationHours: duration,
-                    totalAmount: lotData.pricePerHour * duration,
-                    status: BookingStatus.ACTIVE,
-                    parkingLotInfo: { name: lotData.name, address: lotData.address },
-                };
-                t.set(newBookingRef, booking);
-                t.update(lotRef, { availableSlots: admin.firestore.FieldValue.increment(-1), [`slots.${slot}`]: 'occupied' });
+      return snapshot.docs.map(doc => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          ...data,
+          startTime: data.startTime.toDate().toISOString(),
+          endTime: data.endTime.toDate().toISOString(),
+        };
+      });
+    },
 
-                return { ...booking, id: newBookingRef.id, startTime: startTime.toISOString(), endTime: endTime.toISOString() };
-            });
-        },
-        verifyBooking: async (_: any, { bookingId }: { bookingId: string }, context: ContextValue) => {
-            if (context.user?.role !== 'admin' && context.user?.role !== 'operator') throw new Error("Forbidden");
-            const bookingRef = adminDb.collection('bookings').doc(bookingId);
-            try {
-                 let slotNumber = '';
-                 await adminDb.runTransaction(async (t) => {
-                    const bookingDoc = await t.get(bookingRef);
-                    if (!bookingDoc.exists) throw new Error("Booking not found.");
-                    const bookingData = bookingDoc.data()!;
-                    if (bookingData.status !== BookingStatus.ACTIVE) throw new Error(`Booking is already ${bookingData.status}.`);
-                    
-                    slotNumber = bookingData.slotNumber;
-                    t.update(bookingRef, { status: BookingStatus.COMPLETED });
-                    const lotRef = adminDb.collection('parkingLots').doc(bookingData.lotId);
-                    t.update(lotRef, { availableSlots: admin.firestore.FieldValue.increment(1), [`slots.${bookingData.slotNumber}`]: 'available' });
-                });
-                return { success: true, message: "Check-Out Successful!", details: `Slot ${slotNumber} is now free.` };
-            } catch (error: any) {
-                return { success: false, message: "Verification Failed", details: error.message };
-            }
-        },
-        updateUserRole: async (_: any, { uid, role }: {uid: string, role: string}, context: ContextValue) => {
-            if (context.user?.role !== 'admin') throw new Error("Forbidden");
-            if (!['customer', 'operator', 'admin'].includes(role)) throw new Error("Invalid role specified.");
+    allUsers: async (_: any, __: any, context: ContextValue) => {
+      if (context.user?.role !== 'admin') throw new Error("Forbidden");
+      const snapshot = await adminDb.collection('users').get();
+      return snapshot.docs.map(doc => {
+        const data = doc.data();
+        return { uid: doc.id, ...data, role: data.role || 'customer' };
+      });
+    },
 
-            const userRef = adminDb.collection('users').doc(uid);
-            await userRef.update({ role });
-            await adminAuth.setCustomUserClaims(uid, { role });
-            
-            const doc = await userRef.get();
-            return { uid, ...doc.data() };
-        }
+    adminStats: async (_: any, __: any, context: ContextValue) => {
+      if (context.user?.role !== 'admin') throw new Error("Forbidden");
+
+      const [users, lots, active, completed] = await Promise.all([
+        adminDb.collection('users').get(),
+        adminDb.collection('parkingLots').get(),
+        adminDb.collection('bookings').where('status', '==', BookingStatus.ACTIVE).get(),
+        adminDb.collection('bookings').where('status', '==', BookingStatus.COMPLETED).get(),
+      ]);
+
+      return {
+        totalUsers: users.size,
+        totalLots: lots.size,
+        activeBookings: active.size,
+        completedBookings: completed.size,
+      };
+    },
+  },
+
+  Mutation: {
+
+    // -------------------- PROFILE --------------------
+    setupProfile: async (_: any, { name, vehicle }: any, context: ContextValue) => {
+      if (!context.user) throw new Error("Unauthorized");
+
+      const userRef = adminDb.collection('users').doc(context.user.uid);
+
+      await userRef.set({
+        name,
+        vehicles: [vehicle],
+        email: context.user.email,
+        role: "customer"
+      }, { merge: true });
+
+      const doc = await userRef.get();
+      return { uid: context.user.uid, ...doc.data() };
+    },
+
+    // -------------------- ADD PARKING LOT --------------------
+    addParkingLot: async (_: any, args: any, context: ContextValue) => {
+      if (context.user?.role !== 'admin' && context.user?.role !== 'operator')
+        throw new Error("Forbidden");
+
+      const { name, address, totalSlots, pricePerHour, lat, lng, slotPrefix } = args;
+
+      const slotsMap: any = {};
+      for (let i = 1; i <= totalSlots; i++) {
+        slotsMap[`${slotPrefix}-${i}`] = "available";
+      }
+
+      const newLot = {
+        name,
+        address,
+        totalSlots,
+        pricePerHour,
+        coords: { lat, lng },
+        availableSlots: totalSlots,
+        slots: slotsMap,
+      };
+
+      const docRef = await adminDb.collection('parkingLots').add(newLot);
+      const slots = Object.entries(slotsMap).map(([id, status]) => ({ id, status }));
+
+      return { id: docRef.id, ...newLot, slots };
+    },
+
+    // -------------------- CREATE BOOKING --------------------
+    createBooking: async (_: any, { lotId, slot, duration }: any, context: ContextValue) => {
+      if (!context.user) throw new Error("Unauthorized");
+
+      const lotRef = adminDb.collection('parkingLots').doc(lotId);
+      const newBookingRef = adminDb.collection('bookings').doc();
+
+      return await adminDb.runTransaction(async (t) => {
+        const lotDoc = await t.get(lotRef);
+        if (!lotDoc.exists) throw new Error("Parking lot not found.");
+
+        const lotData = lotDoc.data()!;
+        if (lotData.slots[slot] !== 'available')
+          throw new Error("Slot is no longer available.");
+
+        const startTime = new Date();
+        const endTime = new Date(startTime.getTime() + duration * 3600 * 1000);
+
+        const booking = {
+          userId: context.user!.uid,
+          lotId,
+          slotNumber: slot,
+          startTime: admin.firestore.Timestamp.fromDate(startTime),
+          endTime: admin.firestore.Timestamp.fromDate(endTime),
+          durationHours: duration,
+          totalAmount: lotData.pricePerHour * duration,
+          status: BookingStatus.ACTIVE,
+          parkingLotInfo: { name: lotData.name, address: lotData.address },
+        };
+
+        t.set(newBookingRef, booking);
+        t.update(lotRef, {
+          availableSlots: admin.firestore.FieldValue.increment(-1),
+          [`slots.${slot}`]: 'occupied'
+        });
+
+        return {
+          ...booking,
+          id: newBookingRef.id,
+          startTime: startTime.toISOString(),
+          endTime: endTime.toISOString()
+        };
+      });
+    },
+
+    // -------------------- MOCK PAYMENT: CREATE ORDER --------------------
+    createPaymentOrder: async (_: any, { bookingId }: any, context: ContextValue) => {
+      if (!context.user) throw new Error("Unauthorized");
+
+      const bookingDoc = await adminDb.collection("bookings").doc(bookingId).get();
+      if (!bookingDoc.exists) throw new Error("Booking not found");
+
+      const bookingData = bookingDoc.data()!;
+      const fakeOrderId = "mock_order_" + crypto.randomBytes(8).toString("hex");
+
+      const paymentOrder = {
+        orderId: fakeOrderId,
+        bookingId,
+        amount: bookingData.totalAmount,
+        currency: "INR",
+        status: "PENDING",
+        userId: context.user.uid,
+        createdAt: new Date().toISOString(),
+      };
+
+      await adminDb.collection("payments").doc(fakeOrderId).set(paymentOrder);
+      return paymentOrder;
+    },
+
+    // -------------------- MOCK PAYMENT: PAY ORDER --------------------
+    payOrder: async (_: any, { orderId }: any, context: ContextValue) => {
+      if (!context.user) throw new Error("Unauthorized");
+
+      const paymentRef = adminDb.collection("payments").doc(orderId);
+      const paymentDoc = await paymentRef.get();
+
+      if (!paymentDoc.exists) throw new Error("Order not found");
+
+      await new Promise(r => setTimeout(r, 1500));
+
+      const success = Math.random() > 0.1; // 90% success
+      const paymentId = "mock_payment_" + crypto.randomBytes(8).toString("hex");
+
+      await paymentRef.update({
+        status: success ? "PAID" : "FAILED",
+        paymentId,
+        paidAt: success ? new Date().toISOString() : null
+      });
+
+      return {
+        success,
+        message: success ? "Payment Successful" : "Payment Failed",
+        paymentId: success ? paymentId : null,
+        orderId
+      };
+    },
+
+    // -------------------- MOCK PAYMENT: VERIFY --------------------
+    verifyPayment: async (_: any, { orderId }: any, context: ContextValue) => {
+      if (!context.user) throw new Error("Unauthorized");
+
+      const paymentDoc = await adminDb.collection("payments").doc(orderId).get();
+      if (!paymentDoc.exists) throw new Error("Order not found");
+
+      const data = paymentDoc.data()!;
+      if (data.status !== "PAID") {
+        return { success: false, message: "Payment not completed", orderId };
+      }
+
+      await adminDb.collection("bookings")
+        .doc(data.bookingId)
+        .update({ status: "PAID" });
+
+      return {
+        success: true,
+        message: "Payment Verified Successfully",
+        orderId
+      };
+    },
+
+    // -------------------- UPDATE USER ROLE --------------------
+    updateUserRole: async (_: any, { uid, role }: any, context: ContextValue) => {
+      if (context.user?.role !== 'admin') throw new Error("Forbidden");
+      await adminDb.collection('users').doc(uid).update({ role });
+      return { uid, role };
     }
+
+  }
 };
 
 
-// --- Apollo Server Setup with Express ---
-
+// -------------------- APOLLO SERVER SETUP --------------------
 const server = new ApolloServer<ContextValue>({
   typeDefs,
   resolvers,
 });
 
-// We need to start the server before we can use it
 server.startInBackgroundHandlingStartupErrorsByLoggingAndFailingAllRequests();
 
-// Create the express app
 const app = express();
 
-// Define the context function for Express
-// FIX: Use `ExpressContextFunctionArgument` from `@apollo/server/express4` to ensure the `req` object
-// is correctly typed as `express.Request`, resolving type conflicts with the global `Request` type.
+// -------------------- CONTEXT --------------------
 const createContext = async ({ req }: ExpressContextFunctionArgument): Promise<ContextValue> => {
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-        const token = authHeader.split('Bearer ')[1];
-        try {
-            const decodedToken = await adminAuth.verifyIdToken(token);
-            const userDoc = await adminDb.collection('users').doc(decodedToken.uid).get();
+  const authHeader = req.headers.authorization;
 
-            // Use the role from the Firestore document as the source of truth for authorization.
-            // This ensures that manual DB changes are respected and avoids token staleness issues with custom claims.
-            const role = userDoc.exists ? userDoc.data()?.role : 'customer';
+  if (authHeader?.startsWith("Bearer ")) {
+    const token = authHeader.split("Bearer ")[1];
 
-            return { user: { 
-                uid: decodedToken.uid, 
-                role: role || 'customer',
-                email: decodedToken.email
-            } };
-        } catch (error) {
-            console.error("Auth token verification failed:", error);
-            // Invalid token, proceed without user context
-            return {};
+    try {
+      const decoded = await adminAuth.verifyIdToken(token);
+      const userDoc = await adminDb.collection("users").doc(decoded.uid).get();
+
+      return {
+        user: {
+          uid: decoded.uid,
+          role: userDoc.exists ? userDoc.data()?.role : "customer",
+          email: decoded.email
         }
+      };
+    } catch (err) {
+      return {};
     }
-    return {};
+  }
+
+  return {};
 };
 
-// Setup middleware
-// FIX: Explicitly add CORS and JSON body-parsing middleware before Apollo Server.
-// This is required by Apollo Server v4 and resolves the 'req.body is not set' error.
-// FIX: Splitting middleware into separate `app.use` calls to avoid a complex
-// TypeScript overload resolution error that can occur with multiple handlers in a
-// single call, especially in projects with conflicting global types.
+
+// -------------------- MIDDLEWARE --------------------
 app.use(cors());
 app.use(express.json());
-app.use(
-    '/',
-    expressMiddleware(server, {
-        context: createContext,
-    })
-);
+app.use("/", expressMiddleware(server, { context: createContext }));
 
 
-// Vercel will automatically handle routing the request to this express app
+// -------------------- EXPORT --------------------
 export default app;
